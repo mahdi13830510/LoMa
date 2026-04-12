@@ -1,13 +1,12 @@
 from dataclasses import dataclass
 import re
 import sys
-from typing import Annotated, Callable, Literal, Tuple
+from typing import Callable, Literal, Tuple
 import numpy as np
 from PIL import Image
 
 import torch
 import torch.nn.functional as F
-import tyro
 from torch import nn
 
 from loma.types import Model, Batch
@@ -488,11 +487,3 @@ class LoMaG(LoMa.Cfg):
 
 
 LoMaName = Literal["loma_B128", "loma_B", "loma_L", "loma_G"]
-# Accept either a raw LoMa.Cfg instance or a named preset.
-LoMaConfig = (
-    Annotated[LoMaB128, tyro.conf.subcommand("loma_b128")]
-    | Annotated[LoMaB, tyro.conf.subcommand("loma_b")]
-    | Annotated[LoMaL, tyro.conf.subcommand("loma_l")]
-    | Annotated[LoMaG, tyro.conf.subcommand("loma_g")]
-    | Annotated[LoMa.Cfg, tyro.conf.subcommand("loma_custom")]
-)

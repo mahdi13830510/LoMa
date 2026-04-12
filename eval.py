@@ -4,7 +4,7 @@ import os
 import tyro
 
 from loma import LoMa, LoMaB
-from loma.loma import LoMaConfig
+from loma.cfg import LoMaConfig
 from loma.random import set_seed
 from loma.benchmarks import (
     Mega1500,

@@ -5,8 +5,12 @@ import tyro
 from PIL import Image, ImageDraw
 
 from loma import LoMa
-from loma.loma import LoMaB, LoMaConfig, filter_matches, to_pixel_coords
-
+from loma.loma import (
+    LoMaB,
+    filter_matches,
+    to_pixel_coords    
+)
+from loma.cfg import LoMaConfig
 
 def main(
     matcher: LoMaConfig = LoMaB(),
