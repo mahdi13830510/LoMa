@@ -142,13 +142,10 @@ log.info("LoMa patched ✓")
 # SECTION 2 — DATASET PREPARATION  (fully automated, no manual uploads)
 # ===========================================================================
 # Priority order:
-#   1. LasHeR  — clone metadata from GitHub, then download image zips from
-#                TeraBox/BaiduNetdisk public links if reachable; otherwise
-#                supplement with RoadScene.
+#   1. LasHeR    — clone metadata (split lists) from GitHub; uses image data
+#                  only if already present (requires BaiduNetdisk/TeraBox manually).
 #   2. RoadScene — clone from https://github.com/hanna-xu/road-scene-infrared-
-#                  visible-images (public, images committed directly, ~18 MB).
-#   3. Synthetic — convert public images to a thermal-like domain using
-#                  edge+blur transforms; guarantees the pipeline always runs.
+#                  visible-images (public repo, images committed directly, ~63 MB).
 # ===========================================================================
 
 DATA_DIR = WORK_DIR / "data"
@@ -174,22 +171,9 @@ def _git_clone(url: str, target: Path, depth: int = 1) -> bool:
         return False
 
 
-def _wget(url: str, dest: Path) -> bool:
-    """Download a single file with wget/curl, return True on success."""
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    for cmd in (["wget", "-q", "-O", str(dest), url],
-                ["curl", "-sL", "-o", str(dest), url]):
-        try:
-            _run(cmd)
-            if dest.exists() and dest.stat().st_size > 1024:
-                return True
-        except Exception:
-            pass
-    return False
-
 
 def _count_images(directory: Path, exts=("*.jpg", "*.png", "*.jpeg")) -> int:
-    return sum(len(list(directory.glob(e))) for e in exts)
+    return sum(len(list(directory.rglob(e))) for e in exts)
 
 
 # ---------------------------------------------------------------------------
@@ -202,57 +186,29 @@ def _count_images(directory: Path, exts=("*.jpg", "*.png", "*.jpeg")) -> int:
 #       publicly mirrored zip is reachable.
 #   (c) Fall through to RoadScene if no images are obtained.
 
-LASHER_META_URL  = "https://github.com/BUGPLEASEOUT/LasHeR.git"
-# Known small public mirror of ~30 LasHeR sequences (community upload).
-# Replace with an updated URL if the mirror moves.
-LASHER_SUBSET_URLS: List[str] = [
-    # Hugging Face dataset (uploaded by community)
-    "https://huggingface.co/datasets/Trebor777/LasHeR-subset/resolve/main/lasher_subset_30seq.zip",
-    # Zenodo fallback (if deposited)
-    "https://zenodo.org/record/lasher_subset/files/lasher_subset_30seq.zip",
-]
-
-LASHER_DIR  = DATA_DIR / "LasHeR"
-LASHER_META = DATA_DIR / "LasHeR_meta"
+LASHER_META_URL = "https://github.com/BUGPLEASEOUT/LasHeR.git"
+LASHER_DIR      = DATA_DIR / "LasHeR"
+LASHER_META     = DATA_DIR / "LasHeR_meta"
 
 
 def _acquire_lasher() -> Optional[Path]:
     """
-    Try to obtain LasHeR image data.
-    Returns path to a directory containing sequence sub-dirs, or None.
+    LasHeR images require BaiduNetdisk/TeraBox credentials and cannot be
+    downloaded automatically.  We clone only the metadata repo (split lists)
+    so that build_lasher_pairs() can use the official protocol-2 splits if
+    the user has pre-populated LASHER_DIR with the image sequences.
+    Returns LASHER_DIR if image data is already present, else None.
     """
-    # Step 1: clone metadata repo for split lists
     _git_clone(LASHER_META_URL, LASHER_META)
 
-    # Step 2: check if image data is already present
     if LASHER_DIR.exists() and _count_images(LASHER_DIR) > 50:
-        log.info("LasHeR image data already present at %s", LASHER_DIR)
+        log.info("LasHeR images found at %s", LASHER_DIR)
         return LASHER_DIR
 
-    # Step 3: try public subset mirrors
-    LASHER_DIR.mkdir(exist_ok=True)
-    zip_path = DATA_DIR / "lasher_subset.zip"
-    for url in LASHER_SUBSET_URLS:
-        log.info("Attempting LasHeR subset download from %s …", url)
-        if _wget(url, zip_path):
-            try:
-                import zipfile
-                with zipfile.ZipFile(zip_path) as zf:
-                    zf.extractall(LASHER_DIR)
-                zip_path.unlink(missing_ok=True)
-                n = _count_images(LASHER_DIR)
-                if n > 50:
-                    log.info("LasHeR subset extracted: %d images", n)
-                    return LASHER_DIR
-            except Exception as e:
-                log.warning("LasHeR zip extraction failed: %s", e)
-        zip_path.unlink(missing_ok=True)
-
-    log.warning(
-        "LasHeR image data not reachable automatically (requires BaiduNetdisk/TeraBox auth). "
-        "Falling through to RoadScene."
+    log.info(
+        "LasHeR images not present (BaiduNetdisk/TeraBox required). "
+        "Skipping LasHeR; will use RoadScene."
     )
-    shutil.rmtree(LASHER_DIR, ignore_errors=True)
     return None
 
 
@@ -290,80 +246,6 @@ def _acquire_roadscene() -> Optional[Path]:
     return None
 
 
-# ---------------------------------------------------------------------------
-# Synthetic thermal-optical fallback
-# ---------------------------------------------------------------------------
-# Generates thermal-like images from any publicly downloadable colour image
-# set using: greyscale → gamma invert → Gaussian blur → pseudo-colourmap.
-# Pairs are identity-registered (exact same crops), so GT correspondences
-# are trivial and the pipeline runs without any real thermal sensor data.
-
-SYNTHETIC_DIR = DATA_DIR / "Synthetic"
-
-
-def _simulate_thermal(rgb: np.ndarray) -> np.ndarray:
-    """Convert an RGB float32 [0,1] image to a plausible thermal-like image (3-ch)."""
-    gray = 0.299 * rgb[..., 0] + 0.587 * rgb[..., 1] + 0.114 * rgb[..., 2]
-    # Invert + blur → mimics heat distribution
-    inv  = 1.0 - gray
-    blurred = cv2.GaussianBlur(inv, (15, 15), 5.0)
-    # Add edge energy (edges are often bright in thermal)
-    edges = cv2.Sobel(gray, cv2.CV_32F, 1, 0) ** 2 + cv2.Sobel(gray, cv2.CV_32F, 0, 1) ** 2
-    edges = np.sqrt(edges)
-    edges = edges / (edges.max() + 1e-8)
-    thermal_gray = np.clip(blurred * 0.7 + edges * 0.3, 0, 1)
-    # Apply a pseudo false-colour map to make it look like typical LWIR output
-    thermal_uint8 = (thermal_gray * 255).astype(np.uint8)
-    thermal_color = cv2.applyColorMap(thermal_uint8, cv2.COLORMAP_INFERNO)
-    return thermal_color[:, :, ::-1].astype(np.float32) / 255.0   # BGR→RGB
-
-
-def _acquire_synthetic(n_images: int = 300, img_size: int = 256) -> Path:
-    """
-    Download STL-10 unlabelled set (tiny subset via torchvision) and generate
-    synthetic thermal counterparts.  Falls back to random noise images if even
-    torchvision is unavailable.
-    """
-    if SYNTHETIC_DIR.exists() and _count_images(SYNTHETIC_DIR / "visible") >= n_images:
-        log.info("Synthetic dataset already present")
-        return SYNTHETIC_DIR
-
-    vis_dir = SYNTHETIC_DIR / "visible"
-    thr_dir = SYNTHETIC_DIR / "thermal"
-    vis_dir.mkdir(parents=True, exist_ok=True)
-    thr_dir.mkdir(parents=True, exist_ok=True)
-
-    images: List[np.ndarray] = []
-    try:
-        import torchvision.datasets as tvd
-        stl_root = DATA_DIR / "stl10"
-        log.info("Downloading STL-10 unlabelled split for synthetic pairs …")
-        ds = tvd.STL10(str(stl_root), split="unlabeled", download=True)
-        rng = np.random.default_rng(0)
-        idxs = rng.choice(len(ds), min(n_images, len(ds)), replace=False)
-        for i in idxs:
-            img, _ = ds[i]
-            arr = np.asarray(img, dtype=np.float32) / 255.0  # (96,96,3)
-            arr = cv2.resize(arr, (img_size, img_size))
-            images.append(arr)
-        log.info("Loaded %d images from STL-10", len(images))
-    except Exception as e:
-        log.warning("STL-10 download failed (%s); using random images", e)
-        rng = np.random.default_rng(0)
-        for _ in range(n_images):
-            images.append(rng.random((img_size, img_size, 3), ).astype(np.float32))
-
-    for i, rgb in enumerate(images):
-        vis_path = vis_dir / f"synth_{i:05d}.jpg"
-        thr_path = thr_dir / f"synth_{i:05d}.jpg"
-        vis_uint8 = (rgb * 255).astype(np.uint8)
-        thr_rgb   = _simulate_thermal(rgb)
-        thr_uint8 = (thr_rgb * 255).astype(np.uint8)
-        Image.fromarray(vis_uint8).save(vis_path, quality=92)
-        Image.fromarray(thr_uint8).save(thr_path, quality=92)
-
-    log.info("Synthetic dataset generated: %d pairs in %s", len(images), SYNTHETIC_DIR)
-    return SYNTHETIC_DIR
 
 
 # ---------------------------------------------------------------------------
@@ -470,20 +352,6 @@ def build_lasher_pairs(root: Path, max_per_seq: int = 15) -> List[ImagePair]:
     return result
 
 
-def build_synthetic_pairs(root: Path) -> List[ImagePair]:
-    vis_dir = root / "visible"
-    thr_dir = root / "thermal"
-    raw = [(v, thr_dir / v.name)
-           for v in sorted(vis_dir.glob("*.jpg"))
-           if (thr_dir / v.name).exists()]
-    result = _split_pairs(raw)
-    log.info("Synthetic: %d train / %d val / %d test",
-             sum(1 for p in result if p.split == "train"),
-             sum(1 for p in result if p.split == "val"),
-             sum(1 for p in result if p.split == "test"))
-    return result
-
-
 # ---------------------------------------------------------------------------
 # Orchestrate acquisition
 # ---------------------------------------------------------------------------
@@ -491,13 +359,13 @@ def build_synthetic_pairs(root: Path) -> List[ImagePair]:
 ALL_PAIRS:    List[ImagePair] = []
 DATASET_NAME: str = "unknown"
 
-# 1 — LasHeR
+# 1 — LasHeR (skips automatically if images not pre-populated)
 lasher_root = _acquire_lasher()
 if lasher_root is not None:
     ALL_PAIRS    = build_lasher_pairs(lasher_root, max_per_seq=15)
     DATASET_NAME = "LasHeR"
 
-# 2 — RoadScene (primary or supplement)
+# 2 — RoadScene (cloned automatically from GitHub)
 if len(ALL_PAIRS) < 30:
     roadscene_root = _acquire_roadscene()
     if roadscene_root is not None:
@@ -509,12 +377,13 @@ if len(ALL_PAIRS) < 30:
             ALL_PAIRS.extend(rsp)
             DATASET_NAME = "LasHeR+RoadScene"
 
-# 3 — Synthetic fallback
-if len(ALL_PAIRS) < 20:
-    log.warning("Real thermal-optical data unavailable; using synthetic fallback.")
-    synth_root   = _acquire_synthetic(n_images=400)
-    ALL_PAIRS    = build_synthetic_pairs(synth_root)
-    DATASET_NAME = "Synthetic"
+if len(ALL_PAIRS) == 0:
+    raise RuntimeError(
+        "No thermal-optical pairs found.\n"
+        "  RoadScene: git clone of https://github.com/hanna-xu/road-scene-infrared-visible-images failed.\n"
+        "  LasHeR:    images require manual download from BaiduNetdisk/TeraBox "
+        "(place sequences under /kaggle/working/data/LasHeR/)."
+    )
 
 log.info("Using dataset: %s  total pairs: %d", DATASET_NAME, len(ALL_PAIRS))
 TRAIN_PAIRS = [p for p in ALL_PAIRS if p.split == "train"]
