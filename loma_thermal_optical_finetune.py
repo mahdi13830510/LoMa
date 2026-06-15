@@ -755,7 +755,7 @@ def eval_pair_metrics(
     vis = load_rgb(vis_path, img_size)       # (H,W,3) float32
     thr = load_gray_as_rgb(thr_path, img_size)
 
-    vis_t = torch.from_numpy(vis.T.swapaxes(0, 1).transpose(2, 0, 1)).unsqueeze(0).to(device)
+    vis_t = torch.from_numpy(vis.transpose(2, 0, 1)).unsqueeze(0).to(device)
     thr_t = torch.from_numpy(thr.transpose(2, 0, 1)).unsqueeze(0).to(device)
 
     kpts_A = model._detector.detect({"image": vis_t}, num_keypoints=num_keypoints)["keypoints"]
